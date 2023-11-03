@@ -1,0 +1,292 @@
+---
+title: "MovieLens Project"
+author: "Tharawit Disyawongs"
+date: "2023-10-31"
+output:
+  pdf_document: default
+---
+```{r setup, echo=FALSE} 
+knitr::opts_chunk$set(warning = FALSE) 
+```
+
+# Overview
+
+This project is a part of HarvardX PH125.9x Data Science: Capstone course. The project goal is to predict movie ratings using MovieLens dataset, which contains around 10M ratings of 10k movies from 70k users. In this report, we will start with the overview of the project followed by data preparation. Then, we will perform data analysis along with developing several machine learning algorithms. The performance of each algorithm will be evaluated based on RMSE. Then, we will compare the results and come down to the conclusion, and also provide suggestions for future work.
+
+# Data preparation
+
+In this project, we will split MovieLens dataset into two sets, **edx** and **final_holdout_test**. The former will be split further into training and test sets, which will be used for developing machine learning algorithms and comparing the results. Then, the latter, final_holdout_test, will be used for final validation with the final model.
+
+We will start by downloading MovieLens dataset and construct movielens data object.
+
+```{r data_preparation, message=FALSE}
+##########################################################
+# Create edx and final_holdout_test sets 
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+```
+Then, we will separate movielens into edx and final_holdout_test sets.
+
+```{r seperate_data_sets, message=FALSE}
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+Now, we have two sets, edx and final_holdout_test. As we want to keep final_holdout_test only for final validation, we will create training and test sets from edx.
+
+```{r create_test_train_sets, message=FALSE}
+set.seed(1)
+test_index <- createDataPartition(edx$rating, times = 1, p = 0.2, list = FALSE)
+tmp <- edx[test_index,]
+train_set <- edx[-test_index,]
+
+# Make sure userId and movieId in test set are also in train set
+test_set <- tmp %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from test set back into train set
+removed <- anti_join(tmp, test_set)
+train_set <- rbind(train_set, removed)
+
+# Remove unused objects
+rm(tmp,removed,test_index)
+```
+
+# Evaluation approach
+
+The approach we use for evaluating results is the Root Mean Square Error (RMSE). RMSE measures the differences between predicted values from a model and the observed values. Basically, the algorithm that produces lower RMSE is considered to be better. In movie recommendation case, when we define $y_{u,i}$ as the rating movie *i* by user *u* and define the prediction as $\hat{y}_{u,i}$ , the function that computes the RMSE can be defined as the following:
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum_{u,i} (\hat{y}_{u,i}-y_{u,i})^{2}} $$
+
+# Data analysis and modeling approaches
+
+In this section, we will go through several data analysis and modeling approaches. Then, we will present the result of each model. 
+
+## Model 1: Mean of all ratings
+
+We start with the simplest model - predicting the same rating for all the movies without considering any other effect. In this model, we assume that all the differences are explained by random variation. The model can be defined as 
+$$ Y_{u, i} = \mu + \epsilon_{u, i} $$
+where $\mu$ is the real average rating for all movies and $\epsilon_{u, i}$ is an independent error sampled from the same distribution centered at 0. In this model, the estimate that minimizes the RMSE is the least squares estimate of $\mu$, and $\mu$ can be calculated as the following:
+```{r}
+mu <- mean(train_set$rating)
+mu
+```
+
+And we can compute the RMSE of the first model as below.
+```{r}
+model_1_rmse <- RMSE(test_set$rating, mu)
+results <- data_frame(Method = "Model 1: Mean of all ratings", RMSE = round(model_1_rmse,7))
+results %>% knitr::kable()
+```
+
+## Model 2: Mean + movie effect
+
+In general, we know that some movies are good and some are bad, so they are rated differently, and that cause movie effect. To virtualize the movie effect, we create the histogram of the movie ratings from edx set and observe the distribution.
+```{r}
+edx %>% group_by(movieId) %>% summarize(mean(rating)) %>% pull() %>% hist(main=NULL)
+```
+
+The above histogram tells us that different movies have different average ratings, so we decide to add the movie effect to our model. We use $b_{i}$ to represent the effect of movie *i*. Now, the model is $$Y_{u, i} = \mu +b_{i}+ \epsilon_{u, i}$$
+
+As the following, $b_{i}$ is calculated by the average of the difference between the observed rating and $\mu$. After the computation is done, we can see its distribution via histogram.
+```{r}
+bi <- train_set %>% group_by(movieId) %>% summarize(bi=mean(rating-mu))
+bi %>% ggplot(aes(x=bi)) + geom_histogram(binwidth=0.1,color="black", fill="white")
+```
+The movie effect histogram is left-skewed, indicating that most movies are penalized, which means they should have average ratings lower than the mean ($\mu$).
+
+Adding movie effect seems to reduce RMSE, as we can see in the following:
+```{r}
+model_2_rmse <- test_set %>% left_join(bi, by = "movieId") %>% mutate(pred = mu+bi) %>% 
+                summarize(rmse = RMSE(rating, pred)) %>% pull(rmse)
+results <- rbind(results,c("Model 2: Mean + movie effect", round(model_2_rmse,7)))
+results %>% knitr::kable()
+```
+
+## Model 3: Mean + movie effect + user effect
+
+We know that each individual has different taste and preference, and that could impact the way he/she rates movies. Some users might be tough graders and generally give low movie ratings while some users might be generous and usually provide high ratings, and we call that "user effect". To virtualize user effect, we compute the average rating each user gave, and observe data distribution via histogram as below. 
+```{r}
+edx %>% group_by(userId) %>% summarize(mean(rating)) %>% pull() %>% hist(main=NULL)
+```
+
+The above histogram seems to indicate user effect, as the average ratings from users are varied. So, we take user effect into consideration. Now, the model is $$Y_{u, i} = \mu + b_{i} + b_{u} + \epsilon_{u, i}$$ where $b_{u}$ is user effect.
+
+
+We construct $b_{u}$ as below. After the computation is done, we also observe its distribution via histogram, and it looks close to normal distribution.
+```{r}
+bu <- train_set %>% left_join(bi,by="movieId") %>% group_by(userId) %>% 
+      summarize(bu = mean(rating-mu-bi))
+bu %>% ggplot( aes(x=bu)) + geom_histogram(binwidth=0.1,color="black", fill="white")
+```
+
+Then, we calculate RMSE for this model, and the result is as the following:
+```{r}
+model_3_rmse <- test_set %>% left_join(bi, by = "movieId") %>% left_join(bu, by = "userId")  %>%
+              mutate(pred=mu+bi+bu) %>% summarize(rmse = RMSE(rating, pred)) %>% pull(rmse)
+results <- rbind(results,c("Model 3: Mean + movie effect + user effect", round(model_3_rmse,7)))
+results %>% knitr::kable()
+```
+
+## Model 4: Regularization on movie and user effects
+
+After exploring the edx set, we found that some movies got very high ratings. However, when looking closer, those are unpopular movies rated by very few people.
+```{r}
+edx %>% group_by(movieId) %>% summarize(avg_rating=mean(rating),n=n()) %>% 
+        filter(avg_rating>4.5 ) %>% left_join(edx, by = "movieId") %>% 
+        select(movieId,title, avg_rating, n) %>% distinct() %>% arrange(desc(avg_rating))
+```
+Those movie ratings have very small sample sizes, and could yield a lot of prediction errors. To make our prediction more accurate, we should give a penalty to those with small samples, and this penalty should be gradually reduced once the sample size becomes larger.
+
+In the following code, we use lambda ($\lambda$) to penalize $b_{i}$ and $b_{u}$ in case of a small sample size. In order to find the optimal lambda, we use cross validation to find the one that minimizes RMSE.
+```{r}
+lambdas <- seq(0, 6, 0.25)
+rmses <- sapply(lambdas,function(x){
+  bi <- train_set %>% group_by(movieId) %>% summarize(bi=sum(rating-mu)/(n()+x))
+  bu <- train_set %>% left_join(bi,by="movieId") %>% group_by(userId)  %>% 
+        summarize(bu=sum(rating-mu-bi)/(n()+x))
+  pred_ratings <- test_set %>% left_join(bi, by = "movieId") %>% left_join(bu, by = "userId") %>% 
+                mutate(pred=mu+bi+bu) %>% pull(pred)
+  return(RMSE(test_set$rating, pred_ratings))
+})
+qplot(lambdas, rmses)
+```
+
+As the above plot, the optimal lambda is the following:
+```{r}
+lambda <- lambdas[which.min(rmses)]
+lambda
+```
+
+And RMSE associated to that lambda is as below:
+```{r}
+model_4_rmse <- min(rmses)
+results <- rbind(results,c("Model 4: Regularization on movie and user effects", round(model_4_rmse,7)))
+results %>% knitr::kable()
+```
+
+## Model 5: Matrix Factorization 
+
+Matrix factorization is a popular approach for recommendation systems which uses historical data to predict the ratings. The main idea is to decompose the user-movie matrix into the product of smaller matrices and find the relationship between users and items (movies). Considering the efficiency of the computation process, **recosystem packgage** https://cran.r-project.org/web/packages/recosystem/ will be used to build the model.
+
+In this model, we will use recosystem in the simplest way without any tuning parameter and observe the result. 
+
+
+First, we start by converting train and test sets into recosystem input format. Then, we use the train object (train_reco) for training the model.
+```{r}
+library(recosystem)
+set.seed(1)
+train_reco <- with(train_set, data_memory(user_index = userId, item_index = movieId, rating = rating))
+test_reco <- with(test_set, data_memory(user_index = userId, item_index = movieId, rating = rating))
+reco <- Reco()
+reco$train(train_reco) 
+```
+
+After that, we compute RMSE of this model, and the result seems to be much better than the previous ones.
+```{r}
+results_reco <- reco$predict(test_reco, out_memory())
+model_5_rmse <- RMSE(results_reco, test_set$rating)
+results <- rbind(results,c("Model 5: Matrix factorization",round(model_5_rmse,7)))
+results %>% knitr::kable()
+```
+
+## Model 6: Matrix Factorization with tuning parameters
+
+From the previous model, the RMSE looks impressive, but can we do it even better? In recosystem packgage, it has regularization parameters, so we will try that and see if they could provide a better result. The tuning parameters that we use are **costp_l2** for user regularization and **costq_l2** for item (movie) regularization.
+
+Please be noted that, for better performance, **nthread** parameter can be tuned so that we get the benefit of better speed from parallel computation when building a model (i.e, we can set it to 4 for a quad-core CPU machine). However, the drawback is that it will not guarantee reproducible results even with set.seed() function used. So, that tuning is not used in the following code.
+```{r}
+set.seed(1)
+opts_tune <- reco$tune(train_reco, opts = list(costp_l2 = c(0.01, 0.1), # user regularization
+                                            costq_l2 = c(0.01, 0.1), # movie regularization
+                                            nthread = 1)) 
+
+reco$train(train_reco, opts = opts_tune$min) 
+results_reco <- reco$predict(test_reco, out_memory())
+```
+
+After using tuning parameters, we calculate RMSE, and this model seems to generate the best result by far.
+```{r, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+model_6_rmse <- RMSE(results_reco, test_set$rating)
+results <- rbind(results,c("Model 6: Matrix factorization with tuning parameters",
+                            round(model_6_rmse,7)))
+results %>% knitr::kable()
+```
+
+# Final Result
+
+Now, we will perform a final validation by running our final model using final_holdout_test data set. 
+```{r}
+final_holdout_reco <- with(final_holdout_test, data_memory(user_index = userId, 
+                                                           item_index = movieId, 
+                                                           rating = rating))
+pred_reco <- reco$predict(final_holdout_reco, out_memory())
+final_rmse <- RMSE(final_holdout_test$rating, pred_reco)
+results <- rbind(results,c("Final validation: model 6 on final_holdout_test", round(final_rmse,7)))
+results %>% knitr::kable()
+```
+From the above result, the model of matrix factorization with tuning parameters seems to generate very low RMSE on final validation set.
+
+# Conclusion
+
+In this project, we build and test several models, and optimize them along the way. For linear models, using movie and user effects along with regularization provides the minimum RMSE. However, matrix factorization (via recosystem) seems to be a much better approach. Especially, when we use it along with user and movie regularization via tuning parameters, the RMSE can go below 0.8 on validation (final_holdout_test) set, which is quite impressive.
+
+The drawback of matrix factorization with tuning parameters is that it consumes a lot of CPU, memory resource and time. Given that, it would be great if we could find a way to build a model with less resource consumption while not losing its accuracy. So, for future work, there could be some improvements in efficiency and accuracy that we can explore.
